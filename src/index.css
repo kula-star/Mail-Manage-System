@@ -1,0 +1,12 @@
+:root {
+  color: #27312e;
+  background: #f6f8f5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html { min-width: 320px; min-height: 100%; }
+body { min-width: 320px; min-height: 100vh; margin: 0; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #5b9b7c; outline-offset: 2px; }
