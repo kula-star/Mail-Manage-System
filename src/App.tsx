@@ -43,6 +43,7 @@ type Address = {
   addedAt: string;
   replied: boolean;
   exported?: boolean;
+  number: number;
 };
 type EventRow = {
   id: string;
@@ -56,14 +57,14 @@ type EventRow = {
   duplicateCount?: number;
   invalidCount?: number;
 };
-type Database = { addresses: Address[]; events: EventRow[] };
+type WebsiteTrack = { id: string; url: string; views: number };
+type Database = { addresses: Address[]; events: EventRow[]; tracks: WebsiteTrack[] };
 const today = () => new Date().toISOString().slice(0, 10);
 const PAGE_SIZE = 10;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
 type ActivityPeriod = "daily" | "weekly" | "monthly";
-type SortField = "email" | "country" | "addedAt" | "replied" | "exported";
 type HistorySortField = "type" | "description" | "at";
-const emptyDb = (): Database => ({ addresses: [], events: [] });
+const emptyDb = (): Database => ({ addresses: [], events: [], tracks: [] });
 const readApiResponse = async (response: Response) => {
   const text = await response.text();
   let body: Record<string, unknown>;
@@ -102,9 +103,11 @@ function App() {
     () => sessionStorage.getItem("mail-manage-auth-error") || "",
   );
   const [database, setDatabase] = useState<Database>(emptyDb());
+  const [trackUrl, setTrackUrl] = useState("");
+  const [trackBusy, setTrackBusy] = useState(false);
   const [countries, setCountries] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<
-    "Overview" | "Addresses" | "History" | "API"
+    "Overview" | "Addresses" | "History" | "Report" | "Track" | "API"
   >("Overview");
   const [search, setSearch] = useState("");
   const [countryFilter, setCountryFilter] = useState("All countries");
@@ -113,8 +116,9 @@ function App() {
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [activityPeriod, setActivityPeriod] = useState<ActivityPeriod>("daily");
   const [selected, setSelected] = useState<string[]>([]);
-  const [sortField, setSortField] = useState<SortField>("addedAt");
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
+  const [exportFilter, setExportFilter] = useState("All export statuses");
+  const [replyFilter, setReplyFilter] = useState("All reply statuses");
+  const [reportDate, setReportDate] = useState(today());
   const [historySortField, setHistorySortField] = useState<HistorySortField>("at");
   const [historySortDirection, setHistorySortDirection] = useState<"asc" | "desc">("desc");
   const [showAdd, setShowAdd] = useState(false);
@@ -135,7 +139,7 @@ function App() {
 
   const refreshData = async () => {
     const data = await api<Database & { countries: string[] }>("/api/data");
-    setDatabase({ addresses: data.addresses, events: data.events });
+    setDatabase({ addresses: data.addresses, events: data.events, tracks: data.tracks });
     setCountries(data.countries);
   };
   useEffect(() => {
@@ -149,7 +153,7 @@ function App() {
       })
       .then((data) => {
         if (cancelled) return;
-        setDatabase({ addresses: data.addresses, events: data.events });
+        setDatabase({ addresses: data.addresses, events: data.events, tracks: data.tracks });
         setCountries(data.countries);
       })
       .catch((error: Error) => {
@@ -231,6 +235,29 @@ function App() {
       setNotice((error as Error).message);
     }
   };
+  const addTrack = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setTrackBusy(true);
+    try {
+      await api("/api/tracks", { method: "POST", body: JSON.stringify({ url: trackUrl }) });
+      await refreshData();
+      setTrackUrl("");
+      setNotice("Website added to tracking.");
+    } catch (error) {
+      setNotice((error as Error).message);
+    } finally {
+      setTrackBusy(false);
+    }
+  };
+  const removeTrack = async (id: string, url: string) => {
+    try {
+      await api(`/api/tracks/${id}`, { method: "DELETE" });
+      await refreshData();
+      setNotice(`${url} removed from tracking.`);
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  };
   const exportCsv = async (selection?: { start: number; end: number } | { ids: string[] }) => {
     try {
       const result = await api<{ emails: string[]; count: number }>(
@@ -261,6 +288,32 @@ function App() {
       setNotice(
         `${result.count} email address${result.count === 1 ? "" : "es"} exported.`,
       );
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  };
+
+  const exportDailyReport = async () => {
+    const rows = database.events
+      .filter((event) => event.at.slice(0, 10) === reportDate)
+      .map((event) => ({
+        Address: event.email,
+        Action: event.description || event.type,
+      }));
+    try {
+      const ExcelJS = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Daily Report");
+      worksheet.addRow(["Address", "Action"]);
+      rows.forEach((row) => worksheet.addRow([row.Address, row.Action]));
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `daily-report-${reportDate}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      setNotice(`${rows.length} report row${rows.length === 1 ? "" : "s"} exported for ${reportDate}.`);
     } catch (error) {
       setNotice((error as Error).message);
     }
@@ -298,11 +351,6 @@ function App() {
     } finally { setApiBusy(false); }
   };
 
-  const changeSort = (field: SortField) => {
-    setPage(1);
-    if (sortField === field) setSortDirection(sortDirection === "asc" ? "desc" : "asc");
-    else { setSortField(field); setSortDirection(field === "addedAt" ? "desc" : "asc"); }
-  };
   const changeHistorySort = (field: HistorySortField) => {
     setPage(1);
     if (historySortField === field) setHistorySortDirection(historySortDirection === "asc" ? "desc" : "asc");
@@ -395,17 +443,10 @@ function App() {
   );
   const allFilteredAddresses = database.addresses.filter(
     (address) =>
-      (address.email.includes(search.toLowerCase()) ||
-        address.country.toLowerCase().includes(search.toLowerCase())) &&
-      (countryFilter === "All countries" || address.country === countryFilter),
-  ).sort((left, right) => {
-    const a = left[sortField];
-    const b = right[sortField];
-    const comparison = typeof a === "boolean" || typeof b === "boolean"
-      ? Number(Boolean(a)) - Number(Boolean(b))
-      : String(a).localeCompare(String(b));
-    return sortDirection === "asc" ? comparison : -comparison;
-  });
+      (countryFilter === "All countries" || address.country === countryFilter) &&
+      (exportFilter === "All export statuses" || Boolean(address.exported) === (exportFilter === "Exported")) &&
+      (replyFilter === "All reply statuses" || address.replied === (replyFilter === "Replied")),
+  ).sort((left, right) => left.number - right.number);
   const allFilteredEvents = database.events.filter(
     (event) =>
       (!dateFilter || event.at.slice(0, 10) === dateFilter) &&
@@ -559,7 +600,7 @@ function App() {
       </main>
     );
 
-  const nav = ["Overview", "Addresses", "History", "API"] as const;
+  const nav = ["Overview", "Addresses", "History", "Report", "Track", "API"] as const;
   return (
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
@@ -598,6 +639,10 @@ function App() {
                 <Users size={17} />
               ) : item === "History" ? (
                 <FileClock size={17} />
+              ) : item === "Report" ? (
+                <FileClock size={17} />
+              ) : item === "Track" ? (
+                <Globe2 size={17} />
               ) : <Activity size={17} />}
               {item}
               {item === "Addresses" && (
@@ -694,7 +739,7 @@ function App() {
                   ? "Good morning"
                   : activeTab === "Addresses"
                     ? "Address book"
-                    : activeTab === "History" ? "Activity history" : "API reference"}
+                    : activeTab === "History" ? "Activity history" : activeTab === "Report" ? "Daily report" : activeTab === "Track" ? "Website tracking" : "API reference"}
                 <span className="heading-period">.</span>
               </h1>
               <p>
@@ -702,11 +747,11 @@ function App() {
                   ? "A clear view of your contacts and daily activity."
                   : activeTab === "Addresses"
                     ? "Manage, organize, and export your contacts."
-                    : activeTab === "History" ? "A complete record of changes across your workspace." : "Add email addresses from your own tools and integrations."}
+                    : activeTab === "History" ? "A complete record of changes across your workspace." : activeTab === "Report" ? "Review and export address actions for a selected day." : activeTab === "Track" ? "Manage websites and monitor public view events." : "Add email addresses from your own tools and integrations."}
               </p>
             </div>
             <div className="heading-actions">
-              <button
+              {activeTab !== "Report" && activeTab !== "Track" && <button
                 className="secondary-btn"
                 disabled={!allFilteredAddresses.length}
                 onClick={() => {
@@ -716,10 +761,11 @@ function App() {
                 }}
               >
                 <ArrowDownToLine size={16} /> Export range
-              </button>
-              <button className="primary-btn" onClick={() => setShowAdd(true)}>
+              </button>}
+              {activeTab !== "Report" && activeTab !== "Track" && <button className="primary-btn" onClick={() => setShowAdd(true)}>
                 <Plus size={17} /> Add address
-              </button>
+              </button>}
+              {activeTab === "Report" && <button className="primary-btn" onClick={exportDailyReport}><ArrowDownToLine size={16} /> Export Excel</button>}
               {activeTab === "Addresses" && <button className="secondary-btn danger-outline" disabled={!database.addresses.length} onClick={() => void removeAllAddresses()}><Trash2 size={16} /> Remove all</button>}
               {activeTab === "History" && <button className="secondary-btn danger-outline" onClick={() => void clearHistory()}><Trash2 size={16} /> Clear history</button>}
             </div>
@@ -988,17 +1034,6 @@ function App() {
                     addresses
                   </div>
                   <div className="table-controls">
-                    <label className="search-field">
-                      <Search size={16} />
-                      <input
-                        placeholder="Search addresses..."
-                        value={search}
-                        onChange={(event) => {
-                          setPage(1);
-                          setSearch(event.target.value);
-                        }}
-                      />
-                    </label>
                     <label className="filter-select">
                       <Filter size={15} />
                       <select
@@ -1012,6 +1047,22 @@ function App() {
                         {countries.map((country) => (
                           <option key={country}>{country}</option>
                         ))}
+                      </select>
+                    </label>
+                    <label className="filter-select">
+                      <Filter size={15} />
+                      <select value={exportFilter} onChange={(event) => { setPage(1); setExportFilter(event.target.value); }}>
+                        <option>All export statuses</option>
+                        <option>Exported</option>
+                        <option>Not exported</option>
+                      </select>
+                    </label>
+                    <label className="filter-select">
+                      <Filter size={15} />
+                      <select value={replyFilter} onChange={(event) => { setPage(1); setReplyFilter(event.target.value); }}>
+                        <option>All reply statuses</option>
+                        <option>Replied</option>
+                        <option>Not replied</option>
                       </select>
                     </label>
                     <button
@@ -1070,11 +1121,12 @@ function App() {
                             aria-label="Select all addresses"
                           />
                         </th>
-                        <th aria-sort={sortField === "email" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><button className="sort-button" onClick={() => changeSort("email")}>Email address {sortField === "email" ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</button></th>
-                        <th aria-sort={sortField === "country" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><button className="sort-button" onClick={() => changeSort("country")}>Country {sortField === "country" ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</button></th>
-                        <th aria-sort={sortField === "addedAt" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><button className="sort-button" onClick={() => changeSort("addedAt")}>Date added {sortField === "addedAt" ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</button></th>
-                        <th aria-sort={sortField === "replied" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><button className="sort-button" onClick={() => changeSort("replied")}>Reply status {sortField === "replied" ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</button></th>
-                        <th aria-sort={sortField === "exported" ? sortDirection === "asc" ? "ascending" : "descending" : "none"}><button className="sort-button" onClick={() => changeSort("exported")}>Export status {sortField === "exported" ? sortDirection === "asc" ? "↑" : "↓" : "↕"}</button></th>
+                        <th>Number</th>
+                        <th>Email address</th>
+                        <th>Country</th>
+                        <th>Date added</th>
+                        <th>Reply status</th>
+                        <th>Export status</th>
                         <th />
                       </tr>
                     </thead>
@@ -1097,6 +1149,7 @@ function App() {
                               aria-label={`Select ${address.email}`}
                             />
                           </td>
+                          <td>{address.number}</td>
                           <td>
                             <span className="email-cell">
                               <span className="email-avatar">
@@ -1146,18 +1199,10 @@ function App() {
                   {filteredAddresses.length === 0 && (
                     <EmptyState
                       icon={<Mail size={20} />}
-                      title={
-                        search || countryFilter !== "All countries"
-                          ? "No matching addresses"
-                          : "Your address book is empty"
-                      }
-                      detail={
-                        search || countryFilter !== "All countries"
-                          ? "Try a different search or country filter."
-                          : "Add an address manually or import a CSV to get started."
-                      }
+                      title={database.addresses.length ? "No matching addresses" : "Your address book is empty"}
+                      detail={database.addresses.length ? "Try different country, export, or reply filters." : "Add an address manually or import a CSV to get started."}
                       action={
-                        !search && countryFilter === "All countries" ? (
+                        !database.addresses.length ? (
                           <button
                             className="primary-btn"
                             onClick={() => setShowAdd(true)}
@@ -1258,6 +1303,68 @@ function App() {
                 >
                   Clear filters <span>×</span>
                 </button>
+              </div>
+            </section>
+          )}
+          {activeTab === "Report" && (
+            <section className="panel data-panel">
+              <div className="table-toolbar">
+                <div className="table-summary">
+                  <strong>{database.events.filter((event) => event.at.slice(0, 10) === reportDate).length.toLocaleString()}</strong> actions
+                </div>
+                <div className="table-controls">
+                  <label className="date-control report-date-control">
+                    Report date
+                    <input type="date" value={reportDate} onChange={(event) => setReportDate(event.target.value)} />
+                  </label>
+                  <button className="secondary-btn compact" onClick={exportDailyReport}><ArrowDownToLine size={16} /> Export Excel</button>
+                </div>
+              </div>
+              <div className="responsive-table">
+                <table className="report-table">
+                  <thead><tr><th>Address</th><th>Action</th></tr></thead>
+                  <tbody>
+                    {database.events.filter((event) => event.at.slice(0, 10) === reportDate).map((event) => (
+                      <tr key={event.id}><td>{event.email}</td><td>{event.description || event.type}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!database.events.some((event) => event.at.slice(0, 10) === reportDate) && <EmptyState icon={<FileClock size={20} />} title="No activity for this date" detail="Choose another date or check back after an address action is recorded." />}
+              </div>
+              <div className="table-footer"><span>Daily report for {reportDate}</span><span>Excel columns: <code>Address, Action</code></span></div>
+            </section>
+          )}
+          {activeTab === "Track" && (
+            <section className="panel data-panel">
+              <div className="table-toolbar track-toolbar">
+                <div className="table-summary">
+                  <strong>{database.tracks.length.toLocaleString()}</strong> tracked websites
+                </div>
+                <form className="track-add-form" onSubmit={addTrack}>
+                  <input type="text" value={trackUrl} onChange={(event) => setTrackUrl(event.target.value)} placeholder="example.com" aria-label="Website URL" required />
+                  <button className="primary-btn" type="submit" disabled={trackBusy}><Plus size={16} /> Add website</button>
+                </form>
+              </div>
+              <div className="responsive-table">
+                <table className="track-table">
+                  <thead><tr><th>Website</th><th>Views</th><th /></tr></thead>
+                  <tbody>
+                    {database.tracks.map((track) => (
+                      <tr key={track.id}>
+                        <td><a href={track.url} target="_blank" rel="noreferrer">{track.url}</a></td>
+                        <td><strong className="track-views">{track.views.toLocaleString()}</strong></td>
+                        <td><button className="row-icon" onClick={() => void removeTrack(track.id, track.url)} aria-label={`Remove ${track.url}`} title="Remove website"><Trash2 size={15} /></button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!database.tracks.length && <EmptyState icon={<Globe2 size={20} />} title="No websites tracked" detail="Add a website above to start counting public view requests." />}
+              </div>
+              <div className="track-api-note">
+                <div className="panel-heading"><div><h2>Public view endpoint</h2><p>No authentication required. Add the website here before sending view requests.</p></div><span className="method-pill">GET</span></div>
+                <div className="endpoint-line"><code>/api/view?url=example.com</code></div>
+                <pre className="api-code"><code>{`fetch("/api/view?url=example.com")\n  .then((response) => response.json())`}</code></pre>
+                <p className="api-note">The endpoint also accepts a JSON body containing <code>{'{ "url": "example.com" }'}</code>. Each request increments the matching tracked website's view count by one.</p>
               </div>
             </section>
           )}

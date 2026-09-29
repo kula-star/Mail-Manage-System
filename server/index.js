@@ -15,11 +15,13 @@ const formFields = multer().none()
 const User = mongoose.model('User', new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true },
+  addressSequence: { type: Number, default: 0 },
   countries: { type: [String], default: ['United States', 'United Kingdom', 'Canada', 'Australia', 'Germany', 'France', 'Japan', 'India', 'Brazil', 'Other'] },
 }, { timestamps: true }))
 
 const Address = mongoose.model('Address', new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+  number: { type: Number, required: true },
   email: { type: String, required: true, lowercase: true, trim: true },
   country: { type: String, required: true },
   addedAt: { type: String, required: true },
@@ -27,6 +29,18 @@ const Address = mongoose.model('Address', new mongoose.Schema({
   exported: { type: Boolean, default: false },
 }, { timestamps: true }))
 Address.schema.index({ owner: 1, email: 1 }, { unique: true })
+Address.schema.index({ owner: 1, number: 1 }, { unique: true, partialFilterExpression: { number: { $type: 'number' } } })
+
+const WebsiteTrack = mongoose.model('WebsiteTrack', new mongoose.Schema({
+  owner: { type: mongoose.Schema.Types.ObjectId, index: true },
+  url: { type: String, required: true },
+}, { timestamps: true }))
+WebsiteTrack.schema.index({ owner: 1, url: 1 }, { unique: true })
+
+const WebsiteView = mongoose.model('WebsiteView', new mongoose.Schema({
+  url: { type: String, required: true, unique: true },
+  views: { type: Number, default: 0 },
+}, { timestamps: true }))
 
 const Event = mongoose.model('Event', new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
@@ -55,6 +69,36 @@ const requireAuth = (request, response, next) => {
 const userFromRequest = (request) => User.findById(request.userId)
 const logEvent = (owner, type, email, country, quantity = 0, description = '') => Event.create({ owner, type, email, country, quantity, description, at: new Date().toISOString() })
 const validEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+const normalizeWebsiteUrl = (value) => {
+  const input = String(value || '').trim()
+  if (!input || input.length > 2048) return null
+  try {
+    const parsed = new URL(/^[a-z][a-z\d+.-]*:\/\//i.test(input) ? input : `https://${input}`)
+    if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname.includes('.')) return null
+    return parsed.origin.toLowerCase()
+  } catch {
+    return null
+  }
+}
+const reserveAddressNumbers = async (owner, count) => {
+  const user = await User.findOneAndUpdate({ _id: owner }, { $inc: { addressSequence: count } }, { new: true }).select('addressSequence')
+  return user.addressSequence - count + 1
+}
+const ensureAddressNumbers = async (owner) => {
+  const [highest, unnumbered] = await Promise.all([
+    Address.findOne({ owner, number: { $exists: true } }).sort({ number: -1 }).select('number').lean(),
+    Address.find({ owner, number: { $exists: false } }).sort({ addedAt: 1, _id: 1 }).select('_id').lean(),
+  ])
+  if (highest?.number) await User.updateOne({ _id: owner }, { $max: { addressSequence: highest.number } })
+  if (!unnumbered.length) return
+  const firstNumber = await reserveAddressNumbers(owner, unnumbered.length)
+  await Address.bulkWrite(unnumbered.map((address, index) => ({
+    updateOne: {
+      filter: { _id: address._id, number: { $exists: false } },
+      update: { $set: { number: firstNumber + index } },
+    },
+  })))
+}
 
 app.post('/api/auth/signup', async (request, response) => {
   try {
@@ -77,12 +121,72 @@ app.post('/api/auth/signin', async (request, response) => {
 })
 
 app.get('/api/data', requireAuth, async (request, response) => {
-  const [addresses, events, user] = await Promise.all([
+  await ensureAddressNumbers(request.userId)
+  const [addresses, events, user, tracks] = await Promise.all([
     Address.find({ owner: request.userId }).sort({ addedAt: -1 }).lean(),
     Event.find({ owner: request.userId }).sort({ at: -1 }).lean(),
     userFromRequest(request),
+    WebsiteTrack.find({ $or: [{ owner: request.userId }, { owner: null }] }).sort({ url: 1 }).lean(),
   ])
-  response.json({ addresses: addresses.map((item) => ({ ...item, id: String(item._id) })), events: events.map((item) => ({ ...item, id: String(item._id) })), countries: user?.countries || [] })
+  const viewCounts = await WebsiteView.find({ url: { $in: tracks.map((item) => item.url) } }).lean()
+  const countsByUrl = new Map(viewCounts.map((item) => [item.url, item.views]))
+  response.json({ addresses: addresses.map((item) => ({ ...item, id: String(item._id) })), events: events.map((item) => ({ ...item, id: String(item._id) })), countries: user?.countries || [], tracks: tracks.map((item) => ({ ...item, id: String(item._id), views: countsByUrl.get(item.url) || 0 })) })
+})
+
+app.get('/api/tracks', requireAuth, async (request, response) => {
+  const tracks = await WebsiteTrack.find({ $or: [{ owner: request.userId }, { owner: null }] }).sort({ url: 1 }).lean()
+  response.json({ tracks: tracks.map((item) => ({ ...item, id: String(item._id) })) })
+})
+
+app.post('/api/tracks', requireAuth, async (request, response) => {
+  const url = normalizeWebsiteUrl(request.body.url)
+  if (!url) return response.status(400).json({ error: 'Enter a valid website URL.' })
+  try {
+    const track = await WebsiteTrack.create({ owner: request.userId, url })
+    await WebsiteView.updateOne({ url }, { $setOnInsert: { url, views: 0 } }, { upsert: true })
+    response.status(201).json({ ...track.toObject(), id: String(track._id), views: 0 })
+  } catch (error) {
+    response.status(error.code === 11000 ? 409 : 500).json({ error: error.code === 11000 ? 'That website is already being tracked.' : 'Could not add website.' })
+  }
+})
+
+app.delete('/api/tracks/:id', requireAuth, async (request, response) => {
+  const result = await WebsiteTrack.deleteOne({ _id: request.params.id, $or: [{ owner: request.userId }, { owner: null }] })
+  response.json({ removed: result.deletedCount || 0 })
+})
+
+const setViewCorsHeaders = (response) => {
+  response.set('Access-Control-Allow-Origin', '*')
+  response.set('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  response.set('Access-Control-Allow-Headers', 'Content-Type')
+}
+
+app.options('/api/view', (_request, response) => {
+  setViewCorsHeaders(response)
+  response.sendStatus(204)
+})
+
+app.get('/api/view', async (request, response) => {
+  setViewCorsHeaders(response)
+  const url = normalizeWebsiteUrl(request.query.url || request.body?.url)
+  if (!url) return response.status(400).json({ error: 'Provide a valid website URL using the url query parameter or JSON body.' })
+  try {
+    if (!await WebsiteTrack.exists({ url })) {
+      try {
+        await WebsiteTrack.create({ owner: null, url })
+      } catch (error) {
+        if (error.code !== 11000) throw error
+      }
+    }
+    const counter = await WebsiteView.findOneAndUpdate({ url }, { $inc: { views: 1 }, $setOnInsert: { url } }, { new: true, upsert: true })
+    response.json({ success: true, url, views: counter.views })
+  } catch (error) {
+    if (error.code === 11000) {
+      const counter = await WebsiteView.findOneAndUpdate({ url }, { $inc: { views: 1 }, $setOnInsert: { url } }, { new: true, upsert: true })
+      return response.json({ success: true, url, views: counter.views })
+    }
+    throw error
+  }
 })
 
 app.post('/api/addresses', requireAuth, async (request, response) => {
@@ -92,7 +196,9 @@ app.post('/api/addresses', requireAuth, async (request, response) => {
   const user = await userFromRequest(request)
   if (!user?.countries.includes(country)) return response.status(400).json({ error: 'Select a country in your country list.' })
   try {
-    const address = await Address.create({ owner: request.userId, email, country, addedAt: new Date().toISOString() })
+    await ensureAddressNumbers(request.userId)
+    const number = await reserveAddressNumbers(request.userId, 1)
+    const address = await Address.create({ owner: request.userId, number, email, country, addedAt: new Date().toISOString() })
     await logEvent(request.userId, 'Added', email, country, 0, `Manually added ${email} under ${country}.`)
     response.status(201).json({ ...address.toObject(), id: String(address._id) })
   } catch (error) {
@@ -118,7 +224,9 @@ app.post('/v1/addmailaddress', formFields, async (request, response) => {
     await user.save()
   }
   try {
-    const address = await Address.create({ owner: user._id, email, country, addedAt: new Date().toISOString() })
+    await ensureAddressNumbers(user._id)
+    const number = await reserveAddressNumbers(user._id, 1)
+    const address = await Address.create({ owner: user._id, number, email, country, addedAt: new Date().toISOString() })
     await logEvent(user._id, 'Added', email, country, 0, `Added ${email} via API under ${country}.`)
     response.status(201).json({ success: true, address: { ...address.toObject(), id: String(address._id) }, countryFallback: !knownCountry })
   } catch (error) {
@@ -128,6 +236,7 @@ app.post('/v1/addmailaddress', formFields, async (request, response) => {
 
 app.post('/api/addresses/import', requireAuth, async (request, response) => {
   const rows = Array.isArray(request.body.rows) ? request.body.rows : []
+  await ensureAddressNumbers(request.userId)
   const existing = new Set((await Address.find({ owner: request.userId }).distinct('email')).map((value) => value.toLowerCase()))
   const user = await userFromRequest(request)
   let duplicates = 0
@@ -149,6 +258,8 @@ app.post('/api/addresses/import', requireAuth, async (request, response) => {
     additions.push({ owner: request.userId, email, country, addedAt: new Date().toISOString() })
   }
   if (additions.length) {
+    const firstNumber = await reserveAddressNumbers(request.userId, additions.length)
+    additions.forEach((address, index) => { address.number = firstNumber + index })
     const inserted = await Address.insertMany(additions, { ordered: false })
     const at = new Date().toISOString()
     await Event.create({ owner: request.userId, type: 'Import', email: 'CSV import', country: 'All', at, quantity: inserted.length, totalCount: rows.length, duplicateCount: duplicates, invalidCount: invalid, description: `${inserted.length} addresses added from ${rows.length} rows; ${duplicates} duplicates.` })
@@ -196,7 +307,7 @@ app.post('/api/exports', requireAuth, async (request, response) => {
     const first = Number(start); const last = Number(end)
     if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first) return response.status(400).json({ error: 'Enter a valid 1-based range.' })
   }
-  const addresses = await Address.find(query).sort({ addedAt: -1, _id: 1 }).lean()
+  const addresses = await Address.find(query).sort({ number: 1 }).lean()
   const addressesById = new Map(addresses.map((address) => [String(address._id), address]))
   const first = start === undefined ? 1 : Number(start)
   const last = end === undefined ? addresses.length : Number(end)
