@@ -4,8 +4,11 @@ import mongoose from 'mongoose'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import multer from 'multer'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const app = express()
+const distPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 app.use(express.json({ limit: '2mb' }))
 const formFields = multer().none()
 
@@ -229,7 +232,15 @@ app.delete('/api/countries/:country', requireAuth, async (request, response) => 
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' }))
 
-const port = Number(process.env.API_PORT || 3001)
+app.use(express.static(distPath))
+app.get(/.*/, (request, response, next) => {
+  if (request.path.startsWith('/api/') || request.path.startsWith('/v1/')) return next()
+  response.sendFile(resolve(distPath, 'index.html'), (error) => {
+    if (error) next(error)
+  })
+})
+
+const port = Number(process.env.PORT || process.env.API_PORT || 3001)
 const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/mail_manage_system'
 try {
   await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 5000 })
