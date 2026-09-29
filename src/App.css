@@ -278,6 +278,32 @@ button { cursor: pointer; }
 .event-table th:first-child { width: 160px; }
 .event-table th:last-child { width: 175px; }
 .event-table td { height: auto; min-height: 48px; padding: 10px 8px; vertical-align: top; white-space: normal; }
+.report-date-control { width: auto; gap: 8px; padding-right: 7px; white-space: nowrap; }
+.report-date-control input { min-width: 145px; border: 0; outline: 0; background: transparent; color: #53615a; }
+.report-table { width: 100%; border-collapse: collapse; text-align: left; }
+.report-table th { height: 38px; padding: 0 16px; background: #fcfdfc; color: #919a95; font-size: 11px; font-weight: 600; }
+.report-table td { padding: 12px 16px; border-top: 1px solid #f0f2f0; color: #53615a; font-size: 12px; }
+.report-table td:first-child { width: 34%; color: #435049; font-weight: 500; }
+.track-toolbar { flex-wrap: wrap; }
+.track-add-form { display: flex; align-items: center; gap: 8px; }
+.track-add-form input { width: min(300px, 44vw); height: 35px; padding: 0 10px; border: 1px solid #e2e8e3; border-radius: 4px; outline: 0; color: #344139; }
+.track-add-form input:focus { border-color: #75aa8b; box-shadow: 0 0 0 3px #e6f2e9; }
+.track-table { width: 100%; border-collapse: collapse; text-align: left; }
+.track-table th { height: 38px; padding: 0 16px; background: #fcfdfc; color: #919a95; font-size: 11px; font-weight: 600; }
+.track-table td { height: 49px; padding: 0 16px; border-top: 1px solid #f0f2f0; color: #53615a; font-size: 12px; }
+.track-table a { color: #347e66; text-decoration: none; }
+.track-table a:hover { text-decoration: underline; }
+.track-views { color: #344039; font-variant-numeric: tabular-nums; }
+.track-api-note { padding: 18px; border-top: 1px solid #edf0ed; }
+.track-api-note .endpoint-line { margin: 13px 0 10px; }
+.track-api-note .api-code { margin-bottom: 9px; }
+.track-api-note .api-note { margin-bottom: 0; }
+@media (max-width: 760px) {
+	.report-toolbar, .report-toolbar .table-controls { align-items: stretch; flex-direction: column; }
+	.report-date-control { min-height: 36px; }
+	.track-toolbar { align-items: stretch; flex-direction: column; }
+	.track-add-form input { flex: 1; min-width: 0; width: 100%; }
+}
 .event-table .event-email { font-weight: 400; line-height: 1.5; }
 .table-toolbar .danger-outline { margin-left: auto; }
 @media (max-width: 850px) { .api-layout { grid-template-columns: 1fr; } }
